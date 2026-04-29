@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
-use acadrust::CadDocument;
+use acadrust::{CadDocument, entities::{SplineFlags, hatch::BoundaryPathFlags}};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point2 {
@@ -90,6 +90,66 @@ pub struct InsertTransform {
 }
 
 #[derive(Debug, Clone)]
+pub struct BulgeVertex {
+    pub location: Point2,
+    pub bulge: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Polyline2DGeometry {
+    pub vertices: Vec<BulgeVertex>,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Polyline3DGeometry {
+    pub vertices: Vec<Point2>,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SplineGeometry {
+    pub degree: i32,
+    pub flags: SplineFlags,
+    pub knots: Vec<f64>,
+    pub control_points: Vec<Point2>,
+    pub weights: Vec<f64>,
+    pub fit_points: Vec<Point2>,
+}
+
+#[derive(Debug, Clone)]
+pub enum HatchBoundaryEdgeGeometry {
+    Line {
+        start: Point2,
+        end: Point2,
+    },
+    CircularArc {
+        center: Point2,
+        radius: f64,
+        start_angle: f64,
+        end_angle: f64,
+        counter_clockwise: bool,
+    },
+    EllipticArc {
+        center: Point2,
+        major_axis_endpoint: Point2,
+        minor_axis_ratio: f64,
+        start_angle: f64,
+        end_angle: f64,
+        counter_clockwise: bool,
+    },
+    Spline(SplineGeometry),
+    Polyline(Polyline2DGeometry),
+}
+
+#[derive(Debug, Clone)]
+pub struct HatchBoundaryPathGeometry {
+    pub flags: BoundaryPathFlags,
+    pub edges: Vec<HatchBoundaryEdgeGeometry>,
+    pub boundary_handles: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
 pub enum SceneGeometry {
     Line {
         start: Point2,
@@ -112,19 +172,23 @@ pub enum SceneGeometry {
         start_parameter: f64,
         end_parameter: f64,
     },
-    Polyline {
-        points: Vec<Point2>,
-        closed: bool,
+    LwPolyline {
+        polyline: Polyline2DGeometry,
     },
     Spline {
-        control_points: Vec<Point2>,
-        fit_points: Vec<Point2>,
+        spline: SplineGeometry,
+    },
+    Polyline2D {
+        polyline: Polyline2DGeometry,
+    },
+    Polyline3D {
+        polyline: Polyline3DGeometry,
     },
     Solid {
         points: Vec<Point2>,
     },
     Hatch {
-        loops: Vec<Vec<Point2>>,
+        paths: Vec<HatchBoundaryPathGeometry>,
         solid_fill: bool,
     },
     Text {
@@ -168,20 +232,22 @@ impl SceneGeometry {
                 visitor(Point2::new(center.x - radius, center.y - radius));
                 visitor(Point2::new(center.x + radius, center.y + radius));
             }
-            SceneGeometry::Polyline { points, .. } => {
-                for point in points {
+            SceneGeometry::LwPolyline { polyline } | SceneGeometry::Polyline2D { polyline } => {
+                for vertex in &polyline.vertices {
+                    visitor(vertex.location);
+                }
+            }
+            SceneGeometry::Polyline3D { polyline } => {
+                for point in &polyline.vertices {
                     visitor(*point);
                 }
             }
-            SceneGeometry::Spline {
-                control_points,
-                fit_points,
-            } => {
-                for point in fit_points {
+            SceneGeometry::Spline { spline } => {
+                for point in &spline.control_points {
                     visitor(*point);
                 }
-                if fit_points.is_empty() {
-                    for point in control_points {
+                if spline.control_points.is_empty() {
+                    for point in &spline.fit_points {
                         visitor(*point);
                     }
                 }
@@ -191,10 +257,46 @@ impl SceneGeometry {
                     visitor(*point);
                 }
             }
-            SceneGeometry::Hatch { loops, .. } => {
-                for loop_points in loops {
-                    for point in loop_points {
-                        visitor(*point);
+            SceneGeometry::Hatch { paths, .. } => {
+                for path in paths {
+                    for edge in &path.edges {
+                        match edge {
+                            HatchBoundaryEdgeGeometry::Line { start, end } => {
+                                visitor(*start);
+                                visitor(*end);
+                            }
+                            HatchBoundaryEdgeGeometry::CircularArc { center, radius, .. } => {
+                                let r = radius.abs();
+                                visitor(Point2::new(center.x - r, center.y - r));
+                                visitor(Point2::new(center.x + r, center.y + r));
+                            }
+                            HatchBoundaryEdgeGeometry::EllipticArc {
+                                center,
+                                major_axis_endpoint,
+                                ..
+                            } => {
+                                let radius = (major_axis_endpoint.x * major_axis_endpoint.x
+                                    + major_axis_endpoint.y * major_axis_endpoint.y)
+                                    .sqrt();
+                                visitor(Point2::new(center.x - radius, center.y - radius));
+                                visitor(Point2::new(center.x + radius, center.y + radius));
+                            }
+                            HatchBoundaryEdgeGeometry::Spline(spline) => {
+                                for point in &spline.control_points {
+                                    visitor(*point);
+                                }
+                                if spline.control_points.is_empty() {
+                                    for point in &spline.fit_points {
+                                        visitor(*point);
+                                    }
+                                }
+                            }
+                            HatchBoundaryEdgeGeometry::Polyline(polyline) => {
+                                for vertex in &polyline.vertices {
+                                    visitor(vertex.location);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -233,6 +335,14 @@ pub struct BlockInfo {
     pub entity_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutInfo {
+    pub name: String,
+    pub root_block_name: String,
+    pub tab_order: i16,
+    pub is_model: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtractionStats {
     pub total_entities: usize,
@@ -251,6 +361,7 @@ pub struct ExtractedDrawing {
     pub block_index: BTreeMap<String, Vec<usize>>,
     pub layers: BTreeMap<String, LayerInfo>,
     pub blocks: BTreeMap<String, BlockInfo>,
+    pub layouts: Vec<LayoutInfo>,
     pub bounds: Option<Bounds2D>,
     pub stats: ExtractionStats,
 }

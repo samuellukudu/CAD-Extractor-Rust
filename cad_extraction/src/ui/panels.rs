@@ -69,14 +69,14 @@ pub fn show_sidebar(
     ui: &mut Ui,
     drawing: &ExtractedDrawing,
     filters: &mut VisibilityFilters,
-    selected: Option<&SceneEntity>,
     render_stats: &RenderStats,
-    selected_transform_chain: &[String],
-    selected_style_source: Option<StyleSource>,
 ) -> SidebarActions {
     let mut request_fit_view = false;
-    ui.heading("Drawing Controls");
+    ui.heading("Explorer");
     ui.label(format!("File: {}", drawing.source_path.display()));
+    if let Some(layout) = drawing.layouts.first() {
+        ui.small(format!("Layouts detected: {} (default: {})", drawing.layouts.len(), layout.name));
+    }
     ui.separator();
 
     if ui.button("Fit To View").clicked() {
@@ -153,6 +153,45 @@ pub fn show_sidebar(
         }
     });
 
+    SidebarActions { request_fit_view }
+}
+
+pub fn show_properties_panel(
+    ui: &mut Ui,
+    drawing: &ExtractedDrawing,
+    active_layout_name: &str,
+    visible_entity_count: usize,
+    selected: Option<&SceneEntity>,
+    selected_transform_chain: &[String],
+    selected_style_source: Option<StyleSource>,
+    render_stats: &RenderStats,
+) {
+    ui.heading("Properties");
+    ui.separator();
+
+    ui.collapsing("Document", |ui| {
+        ui.label(format!("Path: {}", drawing.source_path.display()));
+        ui.label(format!("Active layout: {active_layout_name}"));
+        ui.label(format!("Layouts: {}", drawing.layouts.len()));
+        ui.label(format!("Layers: {}", drawing.layers.len()));
+        ui.label(format!("Blocks: {}", drawing.blocks.len()));
+        ui.label(format!("Visible entities: {visible_entity_count}"));
+        if let Some(bounds) = drawing.bounds {
+            ui.monospace(format!(
+                "Bounds: ({:.2}, {:.2}) -> ({:.2}, {:.2})",
+                bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y
+            ));
+        } else {
+            ui.label("Bounds: unavailable");
+        }
+    });
+
+    ui.collapsing("Render Stats", |ui| {
+        ui.label(format!("Traversed: {}", render_stats.traversed_entities));
+        ui.label(format!("Drawn: {}", render_stats.drawn_entities));
+        ui.label(format!("Culled: {}", render_stats.culled_entities));
+    });
+
     ui.separator();
     ui.heading("Selection");
     if let Some(entity) = selected {
@@ -175,6 +214,4 @@ pub fn show_sidebar(
     } else {
         ui.label("No entity selected.");
     }
-
-    SidebarActions { request_fit_view }
 }

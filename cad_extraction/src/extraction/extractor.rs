@@ -6,15 +6,17 @@ use std::{
 
 use acadrust::{
     CadDocument, Color, EntityType, Handle, LineWeight,
-    entities::hatch::{BoundaryEdge, BoundaryPath},
+    entities::{SplineFlags, hatch::{BoundaryEdge, BoundaryPath}},
+    objects::ObjectType,
 };
 
 use super::{
     error::ExtractionError,
     models::{
-        BlockInfo, Bounds2D, CadColorSpec, CadLineWeightSpec, EntityStyle, ExtractedDrawing,
-        ExtractionStats, InsertTransform, LayerInfo, Point2, SceneEntity, SceneGeometry,
-        TextPayload,
+        BlockInfo, Bounds2D, BulgeVertex, CadColorSpec, CadLineWeightSpec, EntityStyle,
+        ExtractedDrawing, ExtractionStats, HatchBoundaryEdgeGeometry, HatchBoundaryPathGeometry,
+        InsertTransform, LayerInfo, LayoutInfo, Point2, Polyline2DGeometry, Polyline3DGeometry,
+        SceneEntity, SceneGeometry, SplineGeometry, TextPayload,
     },
     reader::read_document,
 };
@@ -127,6 +129,40 @@ pub fn extract_document(
         })
         .collect();
 
+    let block_name_by_handle: BTreeMap<Handle, String> = document
+        .block_records
+        .iter()
+        .map(|record| (record.handle, record.name.clone()))
+        .collect();
+
+    let mut layouts: Vec<LayoutInfo> = document
+        .objects
+        .values()
+        .filter_map(|object| {
+            let ObjectType::Layout(layout) = object else {
+                return None;
+            };
+            let root_block_name = block_name_by_handle.get(&layout.block_record)?.clone();
+            Some(LayoutInfo {
+                is_model: root_block_name.eq_ignore_ascii_case("*Model_Space"),
+                name: layout.name.clone(),
+                root_block_name,
+                tab_order: layout.tab_order,
+            })
+        })
+        .collect();
+
+    layouts.sort_by_key(|layout| (!layout.is_model, layout.tab_order, layout.name.clone()));
+
+    if layouts.is_empty() {
+        layouts.push(LayoutInfo {
+            name: "Model".to_owned(),
+            root_block_name: "*Model_Space".to_owned(),
+            tab_order: 0,
+            is_model: true,
+        });
+    }
+
     let total_entities = entities.len();
     let renderable_entities = total_entities.saturating_sub(ignored_entities);
 
@@ -139,6 +175,7 @@ pub fn extract_document(
         block_index,
         layers,
         blocks,
+        layouts,
         bounds,
         stats: ExtractionStats {
             total_entities,
@@ -172,41 +209,59 @@ fn to_scene_geometry(entity: &EntityType) -> SceneGeometry {
             start_parameter: ellipse.start_parameter,
             end_parameter: ellipse.end_parameter,
         },
-        EntityType::LwPolyline(polyline) => SceneGeometry::Polyline {
-            points: polyline
-                .vertices
-                .iter()
-                .map(|vertex| Point2::new(vertex.location.x, vertex.location.y))
-                .collect(),
-            closed: polyline.is_closed,
+        EntityType::LwPolyline(polyline) => SceneGeometry::LwPolyline {
+            polyline: Polyline2DGeometry {
+                vertices: polyline
+                    .vertices
+                    .iter()
+                    .map(|vertex| BulgeVertex {
+                        location: Point2::new(vertex.location.x, vertex.location.y),
+                        bulge: vertex.bulge,
+                    })
+                    .collect(),
+                closed: polyline.is_closed,
+            },
         },
-        EntityType::Polyline(polyline) => SceneGeometry::Polyline {
-            points: polyline
-                .vertices
-                .iter()
-                .map(|vertex| Point2::new(vertex.location.x, vertex.location.y))
-                .collect(),
-            closed: polyline.is_closed(),
+        EntityType::Polyline(polyline) => SceneGeometry::Polyline3D {
+            polyline: Polyline3DGeometry {
+                vertices: polyline
+                    .vertices
+                    .iter()
+                    .map(|vertex| Point2::new(vertex.location.x, vertex.location.y))
+                    .collect(),
+                closed: polyline.is_closed(),
+            },
         },
-        EntityType::Polyline2D(polyline) => SceneGeometry::Polyline {
-            points: polyline
-                .vertices
-                .iter()
-                .map(|vertex| Point2::new(vertex.location.x, vertex.location.y))
-                .collect(),
-            closed: polyline.is_closed(),
+        EntityType::Polyline2D(polyline) => SceneGeometry::Polyline2D {
+            polyline: Polyline2DGeometry {
+                vertices: polyline
+                    .vertices
+                    .iter()
+                    .map(|vertex| BulgeVertex {
+                        location: Point2::new(vertex.location.x, vertex.location.y),
+                        bulge: vertex.bulge,
+                    })
+                    .collect(),
+                closed: polyline.is_closed(),
+            },
         },
         EntityType::Spline(spline) => SceneGeometry::Spline {
-            control_points: spline
-                .control_points
-                .iter()
-                .map(|point| Point2::new(point.x, point.y))
-                .collect(),
-            fit_points: spline
-                .fit_points
-                .iter()
-                .map(|point| Point2::new(point.x, point.y))
-                .collect(),
+            spline: SplineGeometry {
+                degree: spline.degree,
+                flags: spline.flags,
+                knots: spline.knots.clone(),
+                control_points: spline
+                    .control_points
+                    .iter()
+                    .map(|point| Point2::new(point.x, point.y))
+                    .collect(),
+                weights: spline.weights.clone(),
+                fit_points: spline
+                    .fit_points
+                    .iter()
+                    .map(|point| Point2::new(point.x, point.y))
+                    .collect(),
+            },
         },
         EntityType::Solid(solid) => SceneGeometry::Solid {
             points: vec![
@@ -217,7 +272,7 @@ fn to_scene_geometry(entity: &EntityType) -> SceneGeometry {
             ],
         },
         EntityType::Hatch(hatch) => SceneGeometry::Hatch {
-            loops: hatch.paths.iter().map(path_to_points).collect(),
+            paths: hatch.paths.iter().map(to_hatch_boundary_path).collect(),
             solid_fill: hatch.is_solid,
         },
         EntityType::Text(text) => SceneGeometry::Text {
@@ -263,6 +318,82 @@ fn to_scene_geometry(entity: &EntityType) -> SceneGeometry {
     }
 }
 
+fn to_hatch_boundary_path(path: &BoundaryPath) -> HatchBoundaryPathGeometry {
+    HatchBoundaryPathGeometry {
+        flags: path.flags,
+        edges: path.edges.iter().map(to_hatch_boundary_edge).collect(),
+        boundary_handles: path
+            .boundary_handles
+            .iter()
+            .map(|handle| handle.value())
+            .collect(),
+    }
+}
+
+fn to_hatch_boundary_edge(edge: &BoundaryEdge) -> HatchBoundaryEdgeGeometry {
+    match edge {
+        BoundaryEdge::Line(line) => HatchBoundaryEdgeGeometry::Line {
+            start: Point2::new(line.start.x, line.start.y),
+            end: Point2::new(line.end.x, line.end.y),
+        },
+        BoundaryEdge::CircularArc(arc) => HatchBoundaryEdgeGeometry::CircularArc {
+            center: Point2::new(arc.center.x, arc.center.y),
+            radius: arc.radius,
+            start_angle: arc.start_angle,
+            end_angle: arc.end_angle,
+            counter_clockwise: arc.counter_clockwise,
+        },
+        BoundaryEdge::EllipticArc(ellipse) => HatchBoundaryEdgeGeometry::EllipticArc {
+            center: Point2::new(ellipse.center.x, ellipse.center.y),
+            major_axis_endpoint: Point2::new(
+                ellipse.major_axis_endpoint.x,
+                ellipse.major_axis_endpoint.y,
+            ),
+            minor_axis_ratio: ellipse.minor_axis_ratio,
+            start_angle: ellipse.start_angle,
+            end_angle: ellipse.end_angle,
+            counter_clockwise: ellipse.counter_clockwise,
+        },
+        BoundaryEdge::Spline(spline) => HatchBoundaryEdgeGeometry::Spline(SplineGeometry {
+            degree: spline.degree,
+            flags: SplineFlags {
+                closed: false,
+                periodic: spline.periodic,
+                rational: spline.rational,
+                planar: true,
+                linear: spline.degree <= 1,
+            },
+            knots: spline.knots.clone(),
+            control_points: spline
+                .control_points
+                .iter()
+                .map(|point| Point2::new(point.x, point.y))
+                .collect(),
+            weights: spline
+                .control_points
+                .iter()
+                .map(|point| if spline.rational { point.z } else { 1.0 })
+                .collect(),
+            fit_points: spline
+                .fit_points
+                .iter()
+                .map(|point| Point2::new(point.x, point.y))
+                .collect(),
+        }),
+        BoundaryEdge::Polyline(polyline) => HatchBoundaryEdgeGeometry::Polyline(Polyline2DGeometry {
+            vertices: polyline
+                .vertices
+                .iter()
+                .map(|point| BulgeVertex {
+                    location: Point2::new(point.x, point.y),
+                    bulge: point.z,
+                })
+                .collect(),
+            closed: polyline.is_closed,
+        }),
+    }
+}
+
 fn to_color_spec(color: Color) -> CadColorSpec {
     match color {
         Color::ByLayer => CadColorSpec::ByLayer,
@@ -281,75 +412,95 @@ fn to_line_weight_spec(line_weight: LineWeight) -> CadLineWeightSpec {
     }
 }
 
-fn path_to_points(path: &BoundaryPath) -> Vec<Point2> {
-    let mut points = Vec::new();
-    for edge in &path.edges {
-        match edge {
-            BoundaryEdge::Line(line) => {
-                points.push(Point2::new(line.start.x, line.start.y));
-                points.push(Point2::new(line.end.x, line.end.y));
+#[cfg(test)]
+mod tests {
+    use acadrust::{
+        EntityType, LwPolyline, Spline, Vector2, Vector3,
+        entities::{
+            hatch::{BoundaryEdge, BoundaryPath, SplineEdge},
+            lwpolyline::LwVertex,
+        },
+    };
+
+    use crate::extraction::models::{HatchBoundaryEdgeGeometry, SceneGeometry};
+
+    use super::to_scene_geometry;
+
+    #[test]
+    fn preserves_lwpolyline_bulge_vertices() {
+        let polyline = LwPolyline {
+            vertices: vec![
+                LwVertex::with_bulge(Vector2::new(0.0, 0.0), 1.0),
+                LwVertex::new(Vector2::new(10.0, 0.0)),
+            ],
+            ..LwPolyline::new()
+        };
+
+        let geometry = to_scene_geometry(&EntityType::LwPolyline(polyline));
+
+        match geometry {
+            SceneGeometry::LwPolyline { polyline } => {
+                assert_eq!(polyline.vertices.len(), 2);
+                assert_eq!(polyline.vertices[0].location.x, 0.0);
+                assert_eq!(polyline.vertices[0].bulge, 1.0);
+                assert_eq!(polyline.vertices[1].location.x, 10.0);
             }
-            BoundaryEdge::CircularArc(arc) => {
-                let steps = 24usize;
-                let mut start = arc.start_angle;
-                let mut end = arc.end_angle;
-                if arc.counter_clockwise {
-                    while end < start {
-                        end += std::f64::consts::TAU;
-                    }
-                } else {
-                    while start < end {
-                        start += std::f64::consts::TAU;
-                    }
-                }
-                for i in 0..=steps {
-                    let t = i as f64 / steps as f64;
-                    let angle = if arc.counter_clockwise {
-                        start + (end - start) * t
-                    } else {
-                        start - (start - end) * t
-                    };
-                    points.push(Point2::new(
-                        arc.center.x + arc.radius * angle.cos(),
-                        arc.center.y + arc.radius * angle.sin(),
-                    ));
-                }
-            }
-            BoundaryEdge::EllipticArc(ellipse) => {
-                let steps = 36usize;
-                let major = ellipse.major_axis_endpoint;
-                let major_len = (major.x * major.x + major.y * major.y).sqrt().max(1e-6);
-                let minor_len = major_len * ellipse.minor_axis_ratio;
-                let axis_angle = major.y.atan2(major.x);
-                for i in 0..=steps {
-                    let t = i as f64 / steps as f64;
-                    let angle = ellipse.start_angle + (ellipse.end_angle - ellipse.start_angle) * t;
-                    let x = major_len * angle.cos();
-                    let y = minor_len * angle.sin();
-                    let rotated_x = x * axis_angle.cos() - y * axis_angle.sin();
-                    let rotated_y = x * axis_angle.sin() + y * axis_angle.cos();
-                    points.push(Point2::new(
-                        ellipse.center.x + rotated_x,
-                        ellipse.center.y + rotated_y,
-                    ));
-                }
-            }
-            BoundaryEdge::Spline(spline) => {
-                for point in &spline.fit_points {
-                    points.push(Point2::new(point.x, point.y));
-                }
-                if spline.fit_points.is_empty() {
-                    for point in &spline.control_points {
-                        points.push(Point2::new(point.x, point.y));
-                    }
-                }
-            }
-            BoundaryEdge::Polyline(polyline) => {
-                for point in &polyline.vertices {
-                    points.push(Point2::new(point.x, point.y));
-                }
-            }
+            other => panic!("expected lwpolyline geometry, got {other:?}"),
         }
     }
-    points
+
+    #[test]
+    fn preserves_spline_definition() {
+        let spline = Spline::from_control_points(
+            2,
+            vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(5.0, 10.0, 0.0),
+                Vector3::new(10.0, 0.0, 0.0),
+            ],
+        );
+
+        let geometry = to_scene_geometry(&EntityType::Spline(spline));
+
+        match geometry {
+            SceneGeometry::Spline { spline } => {
+                assert_eq!(spline.degree, 2);
+                assert_eq!(spline.control_points.len(), 3);
+                assert!(spline.knots.len() >= 6);
+                assert!(spline.fit_points.is_empty());
+            }
+            other => panic!("expected spline geometry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserves_hatch_spline_edges() {
+        let mut path = BoundaryPath::new();
+        path.add_edge(BoundaryEdge::Spline(SplineEdge {
+            degree: 2,
+            rational: false,
+            periodic: false,
+            knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            control_points: vec![
+                Vector3::new(0.0, 0.0, 0.0),
+                Vector3::new(5.0, 10.0, 0.0),
+                Vector3::new(10.0, 0.0, 0.0),
+            ],
+            fit_points: Vec::new(),
+            start_tangent: Vector2::new(0.0, 0.0),
+            end_tangent: Vector2::new(0.0, 0.0),
+        }));
+
+        let converted = super::to_hatch_boundary_path(&path);
+
+        assert_eq!(converted.edges.len(), 1);
+        match &converted.edges[0] {
+            HatchBoundaryEdgeGeometry::Spline(spline) => {
+                assert_eq!(spline.degree, 2);
+                assert_eq!(spline.control_points.len(), 3);
+                assert!(spline.fit_points.is_empty());
+            }
+            other => panic!("expected spline hatch edge, got {other:?}"),
+        }
+    }
 }
