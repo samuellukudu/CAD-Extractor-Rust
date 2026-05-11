@@ -1,6 +1,8 @@
+pub mod converter;
 pub mod error;
 pub mod extractor;
 pub mod models;
+pub mod output;
 pub mod reader;
 
 pub use error::ExtractionError;

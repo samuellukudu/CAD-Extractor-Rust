@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use acadrust::{CadDocument, entities::{SplineFlags, hatch::BoundaryPathFlags}};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct Point2 {
     pub x: f64,
     pub y: f64,
@@ -14,7 +14,7 @@ impl Point2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct Bounds2D {
     pub min: Point2,
     pub max: Point2,
@@ -44,7 +44,7 @@ impl Bounds2D {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum CadColorSpec {
     ByLayer,
     ByBlock,
@@ -52,7 +52,7 @@ pub enum CadColorSpec {
     Rgb(u8, u8, u8),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum CadLineWeightSpec {
     ByLayer,
     ByBlock,
@@ -60,7 +60,7 @@ pub enum CadLineWeightSpec {
     Value(i16),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum StyleSource {
     TrueColor,
     Aci,
@@ -68,20 +68,20 @@ pub enum StyleSource {
     Fallback,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct EntityStyle {
     pub color: CadColorSpec,
     pub line_weight: CadLineWeightSpec,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TextPayload {
     pub value: String,
     pub height: f64,
     pub rotation: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct InsertTransform {
     pub position: Point2,
     pub scale_x: f64,
@@ -89,27 +89,28 @@ pub struct InsertTransform {
     pub rotation: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BulgeVertex {
     pub location: Point2,
     pub bulge: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Polyline2DGeometry {
     pub vertices: Vec<BulgeVertex>,
     pub closed: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Polyline3DGeometry {
     pub vertices: Vec<Point2>,
     pub closed: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SplineGeometry {
     pub degree: i32,
+    #[serde(skip)]
     pub flags: SplineFlags,
     pub knots: Vec<f64>,
     pub control_points: Vec<Point2>,
@@ -117,7 +118,8 @@ pub struct SplineGeometry {
     pub fit_points: Vec<Point2>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
 pub enum HatchBoundaryEdgeGeometry {
     Line {
         start: Point2,
@@ -142,14 +144,16 @@ pub enum HatchBoundaryEdgeGeometry {
     Polyline(Polyline2DGeometry),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct HatchBoundaryPathGeometry {
+    #[serde(skip)]
     pub flags: BoundaryPathFlags,
     pub edges: Vec<HatchBoundaryEdgeGeometry>,
     pub boundary_handles: Vec<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
 pub enum SceneGeometry {
     Line {
         start: Point2,
@@ -308,7 +312,7 @@ impl SceneGeometry {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SceneEntity {
     pub id: usize,
     pub handle: u64,
@@ -320,7 +324,7 @@ pub struct SceneEntity {
     pub geometry: SceneGeometry,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct LayerInfo {
     pub name: String,
     pub visible_by_default: bool,
@@ -329,13 +333,13 @@ pub struct LayerInfo {
     pub line_weight: CadLineWeightSpec,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BlockInfo {
     pub name: String,
     pub entity_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LayoutInfo {
     pub name: String,
     pub root_block_name: String,
@@ -343,7 +347,7 @@ pub struct LayoutInfo {
     pub is_model: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ExtractionStats {
     pub total_entities: usize,
     pub renderable_entities: usize,
